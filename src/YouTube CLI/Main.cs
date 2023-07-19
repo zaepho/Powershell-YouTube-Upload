@@ -1,4 +1,5 @@
-﻿using Google.Apis.Auth.OAuth2;
+﻿using Google.Apis;
+using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
 using Google.Apis.Upload;
 using Google.Apis.YouTube.v3;
@@ -7,9 +8,10 @@ using Google.Apis.YouTube.v3.Data;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
-
+using Newtonsoft.Json;
 
 namespace YouTube
 {
@@ -22,7 +24,7 @@ namespace YouTube
         /* Playlist + Add/Include/Exclude */
         VideoIDs,
 
-        /* Playlist + Remove/Include/Exclude */
+        /* Playlist + Remove/Include/Exclude/Get */
         PlaylistID,
 
         /* Video/Playlist + Add */
@@ -63,7 +65,8 @@ namespace YouTube
         Add,
         Remove,
         Include,
-        Exclude
+        Exclude,
+        Fetch
     }
 
     internal class YouTubeCLI
@@ -73,10 +76,11 @@ namespace YouTube
         private static long FileSize = -1;
         private static string VideoID = null;
         private static string PlaylistID = null;
+        private static List<PlaylistItem> PlaylistItems = null;
         // private static UserCredential Credential = null;
 
         [STAThread]
-        static int Main(string[] args)
+        static async int Main(string[] args)
         {
             Thread.CurrentThread.CurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
 
@@ -90,6 +94,7 @@ namespace YouTube
                     Console.Error.WriteLine(ParseRes);
                     return -1;
                 }
+                
             };
 
             switch ((Modes)Configuration[FSM_ArgParser.Mode])
@@ -150,6 +155,25 @@ namespace YouTube
                         {
                             new YouTubeCLI().ExcludePlaylist().Wait();
                             Console.Write("Playlist exclusion successful");
+                        }
+                        catch (AggregateException ex)
+                        {
+                            foreach (Exception e in ex.InnerExceptions)
+                            {
+                                Console.Error.WriteLine("Error: " + e.Message);
+                                return -1;
+                            }
+                        }
+                    }
+                    else if ((Operations)Configuration[FSM_ArgParser.Operation] == Operations.Fetch)
+                    {
+                        try
+                        {
+                            Console.Write("Getting PLaylist");
+                            new YouTubeCLI().GetPlaylist().Wait();
+                            Console.Write("Get Playlist successful");
+                            string json = JsonConvert.SerializeObject(PlaylistItems, Formatting.Indented);
+                            Console.WriteLine(json);
                         }
                         catch (AggregateException ex)
                         {
@@ -236,10 +260,17 @@ namespace YouTube
                             break;
                         case FSM_ArgParser.Operation:
                             Operations Operation = Operations.None;
+                            Console.WriteLine("ParseOperation: " + args[i]);
                             if (Enum.TryParse(args[i], out Operation))
+                            {
+                                Console.WriteLine("Here: " + Operation.ToString());
                                 Configuration[(FSM_ArgParser)CurrState] = Operation;
+                                Console.WriteLine("Config: " + CurrState.ToString());
+                            }
                             else
+                            {
                                 return "Unexpected value for " + CurrState.ToString() + ": " + args[i];
+                            }
                             break;
                         case FSM_ArgParser.Client_Secrets:
                             Configuration[(FSM_ArgParser)CurrState] = Path.GetFullPath(args[i]);
@@ -360,7 +391,10 @@ namespace YouTube
                 return FSM_ArgParser.Mode.ToString() + " must be specified.";
 
             if (!Configuration.ContainsKey(FSM_ArgParser.Operation) || (Operations)Configuration[FSM_ArgParser.Operation] == Operations.None)
-                return FSM_ArgParser.Operation.ToString() + " must be specified.";
+            {
+                Console.WriteLine("Configuration[Operation]: " + (Operations)Configuration[FSM_ArgParser.Operation]);
+                return FSM_ArgParser.Operation.ToString() + " must be specified. [main.cs 392]";
+            }
 
             if (!Configuration.ContainsKey(FSM_ArgParser.Client_Secrets))
                 Configuration[FSM_ArgParser.Client_Secrets] = Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory + @"\client_secrets.json");
@@ -400,8 +434,13 @@ namespace YouTube
                         if (!Configuration.ContainsKey(FSM_ArgParser.VideoIDs))
                             return FSM_ArgParser.VideoIDs.ToString() + " must be specified.";
                     }
+                    else if ((Operations)Configuration[FSM_ArgParser.Operation] == Operations.Fetch)
+                    {
+                        if (!Configuration.ContainsKey(FSM_ArgParser.PlaylistID))
+                            return FSM_ArgParser.PlaylistID.ToString() + " must be specified.";
+                    }
                     else
-                        return FSM_ArgParser.Operation.ToString() + " must be specified.";
+                        return "Unhandled Operation (" + FSM_ArgParser.Operation.ToString() + "] for mode Playlist";
 
                     break;
 
@@ -740,7 +779,38 @@ namespace YouTube
                 }
             }
         }
+        internal async Task GetPlaylist()
+        {
+            UserCredential credential = await GetUserCredential();
 
+            YouTubeService youtubeService = new YouTubeService(new BaseClientService.Initializer()
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = "Google.Apis.Auth"
+            });
+
+            Console.WriteLine("Start GetPlaylist()");
+            // string Parts = "snippet";
+            var nextPageToken = "";
+            while (nextPageToken != null)
+            {
+                PlaylistItemsResource.ListRequest playlistItemsListRequest = youtubeService.PlaylistItems.List("snippet");
+                playlistItemsListRequest.PlaylistId = Configuration[FSM_ArgParser.PlaylistID] as string;
+                playlistItemsListRequest.MaxResults = 50;
+                playlistItemsListRequest.PageToken = nextPageToken;
+                var playlistItemListResponse = await playlistItemsListRequest.ExecuteAsync();
+
+                foreach (var playlistItem in playlistItemListResponse.Items)
+                {
+                    // Print information about each video.
+                    Console.WriteLine("VideoId: " + playlistItem.Snippet.ResourceId.VideoId);
+                    Console.WriteLine("Title: " + playlistItem.Snippet.Title);
+                    PlaylistItems.Add(playlistItem);
+                }
+
+                nextPageToken = playlistItemListResponse.NextPageToken;
+            }
+        }
         private static DateTime TimeMbps;
         private static long DataMbps;
 
